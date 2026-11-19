@@ -1,0 +1,61 @@
+# Builds a signed APK when a version tag (v0.1.0, v0.2.0, ...) is pushed
+# and attaches it to a GitHub release, where Obtainium picks it up.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # v1.2.3 becomes version name 1.2.3 and version code 10203, so later releases always have higher
+      # codes (Android refuses to install a lower one) and re-running a release keeps the same code.
+      - name: Version from tag
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Tag must look like v1.2.3, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          MAJOR=${BASH_REMATCH[1]} MINOR=${BASH_REMATCH[2]} PATCH=${BASH_REMATCH[3]}
+          if (( MINOR > 99 || PATCH > 99 )); then
+            echo "::error::Minor and patch must stay below 100 to fit the version code"
+            exit 1
+          fi
+          echo "VERSION_NAME=${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))" >> "$GITHUB_ENV"
+
+      - name: Decode keystore
+        run: echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.jks"
+
+      - name: Test and build release APK
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon
+          mv app/build/outputs/apk/release/app-release.apk "nu-launcher-${GITHUB_REF_NAME}.apk"
+          # R8 renames classes and methods; this file turns a crash's stack trace back into readable names.
+          mv app/build/outputs/mapping/release/mapping.txt "nu-launcher-${GITHUB_REF_NAME}-mapping.txt"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            nu-launcher-*.apk
+            nu-launcher-*-mapping.txt
+          generate_release_notes: true
